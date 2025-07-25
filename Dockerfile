@@ -69,6 +69,7 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
 # 6) pip 최신화 및 추가 파이썬 라이브러리 설치
 RUN python -m pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir \
+        tensorflow \
         tqdm \
         pillow \
         pycocotools \
