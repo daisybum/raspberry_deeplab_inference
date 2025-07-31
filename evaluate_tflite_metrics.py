@@ -14,6 +14,8 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image, ImageDraw
 from tqdm import tqdm
+import time
+import psutil
 
 # -----------------------------
 # 보조 함수: GT 마스크 생성
@@ -141,10 +143,16 @@ def main():
     data_list, cat_map = load_coco(args.json_path, args.image_dir)
     num_classes = len(cat_map) + 1  # background 포함
     metrics = {
-        'acc': [], 'miou': [], 'mdice': [],
+        'acc': [], 'acc_nobg': [],
+        'miou': [], 'miou_nobg': [],
+        'mdice': [], 'mdice_nobg': [],
         'ious': [[] for _ in range(num_classes)],
         'dices': [[] for _ in range(num_classes)]
     }
+
+    # 추론 시간 & 메모리 사용량 기록용
+    inference_times = []  # seconds
+    memory_usages = []    # MB
 
     for idx, item in enumerate(tqdm(data_list, desc='Evaluate')):
         img_path = item['image_path']
@@ -152,13 +160,27 @@ def main():
         gt = gt_mask_from_anns(item['anns'], cat_map, h, w)
 
         inp, orig_size = preprocess_image(img_path, args.input_height, args.input_width)
+
+        # 추론 시간 측정
+        t0 = time.perf_counter()
         pred = run_inference(interpreter, inp, orig_size)
+        elapsed = time.perf_counter() - t0
+        inference_times.append(elapsed)
+
+        # 메모리 사용량 측정 (RSS)
+        mem_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        memory_usages.append(mem_mb)
 
         # metrics
         mask = (gt < num_classes) & (pred < num_classes)
         if not np.any(mask):
             continue
         metrics['acc'].append(np.mean(pred[mask] == gt[mask]))
+
+        # 배경 제외 정확도
+        nobg_mask = mask & (gt > 0)
+        if np.any(nobg_mask):
+            metrics['acc_nobg'].append(np.mean(pred[nobg_mask] == gt[nobg_mask]))
         ious = []
         dices = []
         for cls in range(num_classes):
@@ -171,16 +193,28 @@ def main():
         metrics['miou'].append(np.mean(ious))
         metrics['mdice'].append(np.mean(dices))
 
+        # 배경 제외 Mean IoU / Dice
+        if len(ious) > 1:
+            metrics['miou_nobg'].append(np.mean(ious[1:]))
+            metrics['mdice_nobg'].append(np.mean(dices[1:]))
+
         if (idx+1) % 100 == 0:
-            print(f"\n[Progress {idx+1}/{len(data_list)}] PixelAcc: {np.mean(metrics['acc']):.4f}, MeanIoU: {np.mean(metrics['miou']):.4f}, MeanDice: {np.mean(metrics['mdice']):.4f}")
+            print(f"\n[Progress {idx+1}/{len(data_list)}] PixelAcc: {np.mean(metrics['acc']):.4f} | PixelAcc(NoBG): {np.mean(metrics['acc_nobg']):.4f} | MeanIoU(NoBG): {np.mean(metrics['miou_nobg']):.4f}")
 
     # 최종 결과
     print("\n" + "="*60)
-    print("TFLite 모델 최종 평가 결과 (배경 포함)")
+    print("TFLite 모델 최종 평가 결과")
     print("="*60)
-    print(f"Pixel Accuracy: {np.mean(metrics['acc']):.4f}")
-    print(f"Mean IoU: {np.mean(metrics['miou']):.4f}")
-    print(f"Mean Dice: {np.mean(metrics['mdice']):.4f}")
+    print(f"Pixel Accuracy (전체): {np.mean(metrics['acc']):.4f}")
+    print(f"Pixel Accuracy (배경 제외): {np.mean(metrics['acc_nobg']):.4f}")
+    print(f"Mean IoU (전체): {np.mean(metrics['miou']):.4f}")
+    print(f"Mean IoU (배경 제외): {np.mean(metrics['miou_nobg']):.4f}")
+    print(f"Mean Dice (전체): {np.mean(metrics['mdice']):.4f}")
+    print(f"Mean Dice (배경 제외): {np.mean(metrics['mdice_nobg']):.4f}")
+
+    # 메모리 / 시간 통계
+    print("\n추론 시간 (초): max={:.4f}, avg={:.4f}, min={:.4f}".format(max(inference_times), np.mean(inference_times), min(inference_times)))
+    print("메모리 사용량 (MB): max={:.2f}, avg={:.2f}, min={:.2f}".format(max(memory_usages), np.mean(memory_usages), min(memory_usages)))
 
     class_names = ['background', 'dry', 'humid', 'slush', 'snow', 'wet']
     print("\n클래스별 IoU / Dice:")
